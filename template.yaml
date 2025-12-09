@@ -1,0 +1,70 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Meow Emoji Generator - Slack app for generating custom cat emojis
+
+Globals:
+  Function:
+    Timeout: 300
+    MemorySize: 512
+
+Parameters:
+  SlackBotToken:
+    Type: String
+    Description: Slack Bot Token (xoxb-...)
+    NoEcho: true
+  SlackSigningSecret:
+    Type: String
+    Description: Slack Signing Secret
+    NoEcho: true
+  GeminiApiKey:
+    Type: String
+    Description: Google Gemini API Key
+    NoEcho: true
+
+Resources:
+  MeowEmojiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: meow-emoji-generator
+      CodeUri: .
+      Handler: src/lambda.handler
+      Runtime: nodejs20.x
+      Architectures:
+        - arm64
+      Environment:
+        Variables:
+          SLACK_BOT_TOKEN: !Ref SlackBotToken
+          SLACK_SIGNING_SECRET: !Ref SlackSigningSecret
+          GEMINI_API_KEY: !Ref GeminiApiKey
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - lambda:InvokeFunction
+              Resource: !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:meow-emoji-generator'
+    Metadata:
+      BuildMethod: nodejs20.x
+
+  MeowEmojiFunctionUrl:
+    Type: AWS::Lambda::Url
+    Properties:
+      TargetFunctionArn: !Ref MeowEmojiFunction
+      AuthType: NONE
+
+  MeowEmojiFunctionUrlPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref MeowEmojiFunction
+      Action: lambda:InvokeFunctionUrl
+      Principal: '*'
+      FunctionUrlAuthType: NONE
+
+Outputs:
+  FunctionUrl:
+    Description: Lambda Function URL (alternative to API Gateway)
+    Value: !GetAtt MeowEmojiFunctionUrl.FunctionUrl
+  FunctionArn:
+    Description: Lambda Function ARN
+    Value: !GetAtt MeowEmojiFunction.Arn

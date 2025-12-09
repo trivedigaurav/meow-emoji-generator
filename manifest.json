@@ -1,0 +1,44 @@
+{
+  "display_information": {
+    "name": "Meow Emoji Generator",
+    "description": "Create adorable custom cat emojis with AI! Use /meow to generate cute meow-style emojis for any emotion or situation. Powered by Google Gemini.",
+    "background_color": "#B37F00",
+    "long_description": "Meow Emoji Generator brings AI-powered creativity to your Slack workspace! Generate unlimited custom cat emojis in the beloved 'meow' style - cute yellow cats with expressive faces perfect for any reaction.\n\nFeatures:\n- /meow [description] - Instantly generate a preview emoji from any description\n- /meow-add [name] [description] - Generate and save emojis with custom names\n- Style-matched generation using reference emojis for consistent look\n- Transparent backgrounds ready for Slack\n- Powered by Google Gemini AI image generation\n\nExamples:\n- /meow happy cat celebrating\n- /meow cat drinking coffee on Monday\n- /meow-add excited cat jumping with joy\n\nPerfect for teams who love expressive reactions and want unique emojis that match their culture!"
+  },
+  "features": {
+    "bot_user": {
+      "display_name": "Meow Emoji Generator",
+      "always_online": true
+    },
+    "slash_commands": [
+      {
+        "command": "/meow",
+        "description": "Generate a new custom meow emoji",
+        "usage_hint": "[description] - e.g., /meow happy cat with sunglasses",
+        "should_escape": false
+      },
+      {
+        "command": "/meow-add",
+        "description": "How to add a meow emoji to your workspace",
+        "should_escape": false
+      }
+    ]
+  },
+  "oauth_config": {
+    "scopes": {
+      "bot": [
+        "commands",
+        "chat:write",
+        "files:write"
+      ]
+    }
+  },
+  "settings": {
+    "interactivity": {
+      "is_enabled": true
+    },
+    "org_deploy_enabled": false,
+    "socket_mode_enabled": true,
+    "token_rotation_enabled": false
+  }
+}

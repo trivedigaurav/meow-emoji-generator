@@ -1,0 +1,26 @@
+{
+  "name": "slack-emoji-generator",
+  "version": "1.0.0",
+  "description": "Slack extension to generate custom emojis using Google Gemini Nano Banana",
+  "main": "src/app.js",
+  "scripts": {
+    "start": "node src/app.js",
+    "dev": "nodemon src/app.js",
+    "build:lambda": "npm ci --omit=dev && zip -r lambda.zip node_modules src package.json",
+    "deploy": "sam deploy --guided"
+  },
+  "dependencies": {
+    "@aws-sdk/client-lambda": "^3.0.0",
+    "@google/genai": "^1.0.0",
+    "@slack/bolt": "^3.17.0",
+    "@slack/web-api": "^7.0.0",
+    "dotenv": "^16.3.1",
+    "sharp": "^0.33.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
