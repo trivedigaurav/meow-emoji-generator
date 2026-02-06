@@ -16,7 +16,7 @@ const app = new App({
 const emojiGenerator = new EmojiGenerator(process.env.GEMINI_API_KEY);
 
 // Reference directory for style matching (now inside project)
-const REFERENCE_DIR = path.join(__dirname, '../slack_emojis');
+const REFERENCE_DIR = path.join(__dirname, '../examples');
 const OUTPUT_DIR = path.join(__dirname, '../generated');
 
 // Fun response messages for personality

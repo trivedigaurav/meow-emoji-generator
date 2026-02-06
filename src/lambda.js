@@ -16,7 +16,7 @@ const lambdaClient = new Lambda({});
 const emojiGenerator = new EmojiGenerator(process.env.GEMINI_API_KEY);
 
 // Reference directory - bundled with Lambda
-const REFERENCE_DIR = path.join(__dirname, '../slack_emojis');
+const REFERENCE_DIR = path.join(__dirname, '../examples');
 // Use /tmp for Lambda (only writable directory)
 const OUTPUT_DIR = path.join(os.tmpdir(), 'generated');
 

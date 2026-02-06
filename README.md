@@ -97,6 +97,12 @@ npm start
 npm run dev
 ```
 
+## Reference Emojis
+
+The generator uses existing "meow" style emojis as references to guide the AI's output. A small set of core examples is included in `examples/` and works out of the box.
+
+For better results, add more meow-style `.png` emojis to the `examples/` directory.
+
 ## Project Structure
 
 ```
@@ -104,8 +110,9 @@ slack-emoji-generator/
 ├── src/
 │   ├── app.js          # Slack bot application
 │   ├── gemini.js       # Gemini API wrapper for emoji generation
+│   ├── lambda.js       # AWS Lambda handler
 │   └── cli.js          # Command-line interface
-├── slack_emojis/       # Reference emoji collection for style matching
+├── examples/           # Reference emoji collection for style matching
 ├── generated/          # Output directory for generated emojis
 ├── manifest.json       # Slack app manifest
 ├── package.json

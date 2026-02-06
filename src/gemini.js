@@ -318,6 +318,12 @@ Requirements:
       'meow_thumbsup.png'
     ];
 
+    // If referenceDir is missing or empty, generate without style references
+    if (!fs.existsSync(referenceDir) || fs.readdirSync(referenceDir).filter(f => f.endsWith('.png')).length === 0) {
+      console.log('No reference images available, generating without style references');
+      return this.generateEmoji(description);
+    }
+
     // Get all meow emoji files and select 5 random ones (excluding core references)
     const allFiles = fs.readdirSync(referenceDir).filter(f =>
       f.startsWith('meow') && f.endsWith('.png') && !coreReferenceFiles.includes(f)

@@ -4,7 +4,7 @@ const path = require('path');
 const fs = require('fs');
 const EmojiGenerator = require('./gemini');
 
-const REFERENCE_DIR = path.join(__dirname, '../slack_emojis');
+const REFERENCE_DIR = path.join(__dirname, '../examples');
 const OUTPUT_DIR = path.join(__dirname, '../generated');
 
 // Ensure output directory exists
@@ -77,7 +77,7 @@ Options:
 
   console.log(`\nGenerating emoji: ${name}`);
   console.log(`Description: ${description}`);
-  console.log('Using style references from slack_emojis...\n');
+  console.log('Using style references from examples...\n');
 
   try {
     const imageBuffer = await generator.generateWithReferences(
