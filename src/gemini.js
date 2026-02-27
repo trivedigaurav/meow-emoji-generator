@@ -303,9 +303,10 @@ Requirements:
    * Generate emoji with style reference from existing emojis
    * @param {string} description - What the emoji should depict
    * @param {string} referenceDir - Directory containing reference emojis
+   * @param {string} [personRefPath] - Optional path to a person's photo to base the cat on
    * @returns {Promise<Buffer>} - PNG image buffer
    */
-  async generateWithReferences(description, referenceDir) {
+  async generateWithReferences(description, referenceDir, personRefPath = null) {
     const referenceImages = [];
 
     // Core reference images to guide the style
@@ -341,10 +342,22 @@ Requirements:
       }
     }
 
+    let personPrompt = '';
+    if (personRefPath) {
+      personPrompt = `
+I've also included a photo of a real person. Make the cat emoji RESEMBLE this person by incorporating their distinctive features:
+- Match their hairstyle/hair color on the cat
+- If they have facial hair (beard, mustache), give the cat similar facial hair
+- Match their clothing/outfit style (e.g., blazer, shirt color)
+- Capture their expression/vibe (e.g., confident, friendly)
+- The cat should be clearly recognizable as a cat-version of this person
+- Keep it as a cute cat emoji - don't make it too realistic`;
+    }
+
     const prompt = `${this.stylePrompt}
 
 I've included reference images showing the exact style to match. Create a new emoji in this EXACT same style.
-
+${personPrompt}
 The new emoji should show: ${description}
 
 IMPORTANT: Match the reference images' style exactly:
@@ -356,7 +369,20 @@ IMPORTANT: Match the reference images' style exactly:
 
     const contents = [{ text: prompt }];
 
-    // Add reference images
+    // Add person reference photo first if provided
+    if (personRefPath) {
+      const personData = fs.readFileSync(personRefPath);
+      const ext = path.extname(personRefPath).toLowerCase();
+      const mimeType = ext === '.png' ? 'image/png' : 'image/jpeg';
+      contents.push({
+        inlineData: {
+          mimeType,
+          data: personData.toString('base64')
+        }
+      });
+    }
+
+    // Add style reference images
     for (const refImage of referenceImages) {
       contents.push({
         inlineData: {
