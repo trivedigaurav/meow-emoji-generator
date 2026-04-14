@@ -213,36 +213,76 @@ Requirements:
       .raw()
       .toBuffer({ resolveWithObject: true });
 
+    const { width, height } = info;
+
     // Detect background color from corners (sample multiple pixels)
-    const bgColor = this.detectBackgroundColor(data, info.width, info.height);
+    const bgColor = this.detectBackgroundColor(data, width, height);
 
-    // Remove background color if detected (make it transparent)
+    // Remove background using flood-fill from edges only.
+    // This preserves interior fill (e.g. white inside eyes/body) while
+    // removing the solid background surrounding the emoji.
     if (bgColor) {
-      const tolerance = 30; // Color matching tolerance
-      for (let i = 0; i < data.length; i += 4) {
-        const r = data[i];
-        const g = data[i + 1];
-        const b = data[i + 2];
+      const tolerance = 30;
+      const visited = new Uint8Array(width * height);
 
-        // Check if pixel matches background color within tolerance
-        if (
-          Math.abs(r - bgColor.r) <= tolerance &&
-          Math.abs(g - bgColor.g) <= tolerance &&
-          Math.abs(b - bgColor.b) <= tolerance
-        ) {
-          data[i + 3] = 0; // Set alpha to 0 (transparent)
+      const matchesBg = (idx) => {
+        return (
+          Math.abs(data[idx] - bgColor.r) <= tolerance &&
+          Math.abs(data[idx + 1] - bgColor.g) <= tolerance &&
+          Math.abs(data[idx + 2] - bgColor.b) <= tolerance
+        );
+      };
+
+      // Seed the flood-fill queue with all border pixels that match background
+      const queue = [];
+      for (let x = 0; x < width; x++) {
+        for (const y of [0, height - 1]) {
+          const pi = y * width + x;
+          if (!visited[pi] && matchesBg(pi * 4)) {
+            queue.push(pi);
+            visited[pi] = 1;
+          }
+        }
+      }
+      for (let y = 1; y < height - 1; y++) {
+        for (const x of [0, width - 1]) {
+          const pi = y * width + x;
+          if (!visited[pi] && matchesBg(pi * 4)) {
+            queue.push(pi);
+            visited[pi] = 1;
+          }
+        }
+      }
+
+      // BFS flood-fill — only spreads through adjacent background-colored pixels
+      while (queue.length > 0) {
+        const pi = queue.shift();
+        const px = pi % width;
+        const py = Math.floor(pi / width);
+        data[pi * 4 + 3] = 0; // Make transparent
+
+        for (const [dx, dy] of [[-1, 0], [1, 0], [0, -1], [0, 1]]) {
+          const nx = px + dx;
+          const ny = py + dy;
+          if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
+          const ni = ny * width + nx;
+          if (!visited[ni] && matchesBg(ni * 4)) {
+            visited[ni] = 1;
+            queue.push(ni);
+          }
         }
       }
     }
 
-    // Reconstruct image with transparency and resize
+    // Reconstruct image with transparency, trim whitespace, then resize
     return sharp(data, {
       raw: {
-        width: info.width,
-        height: info.height,
+        width,
+        height,
         channels: 4
       }
     })
+      .trim()  // Remove transparent borders to eliminate excess whitespace
       .resize(128, 128, {
         fit: 'contain',
         background: { r: 0, g: 0, b: 0, alpha: 0 }
