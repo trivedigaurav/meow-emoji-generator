@@ -432,30 +432,46 @@ IMPORTANT: Match the reference images' style exactly:
       });
     }
 
-    try {
-      const response = await this.client.models.generateContent({
-        model: this.model,
-        contents: [{ parts: contents }],
-        generationConfig: {
-          responseModalities: ['IMAGE'],
-          imageConfig: {
-            aspectRatio: '1:1',
-            imageSize: '1K'
+    const maxAttempts = 3;
+    const retriableStatuses = new Set([429, 500, 502, 503, 504]);
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        const response = await this.client.models.generateContent({
+          model: this.model,
+          contents: [{ parts: contents }],
+          generationConfig: {
+            responseModalities: ['IMAGE'],
+            imageConfig: {
+              aspectRatio: '1:1',
+              imageSize: '1K'
+            }
+          }
+        });
+
+        for (const part of response.candidates[0].content.parts) {
+          if (part.inlineData) {
+            const imageBuffer = Buffer.from(part.inlineData.data, 'base64');
+            return this.processForEmoji(imageBuffer);
           }
         }
-      });
 
-      for (const part of response.candidates[0].content.parts) {
-        if (part.inlineData) {
-          const imageBuffer = Buffer.from(part.inlineData.data, 'base64');
-          return this.processForEmoji(imageBuffer);
+        throw new Error('No image returned from Gemini');
+      } catch (error) {
+        const status = error?.status;
+        const isLastAttempt = attempt === maxAttempts;
+        const isRetriable = retriableStatuses.has(status);
+
+        if (isRetriable && !isLastAttempt) {
+          const backoffMs = 1000 * Math.pow(2, attempt - 1);
+          console.warn(`Gemini generation failed (status ${status}), retrying in ${backoffMs}ms (attempt ${attempt}/${maxAttempts})`);
+          await new Promise(resolve => setTimeout(resolve, backoffMs));
+          continue;
         }
-      }
 
-      throw new Error('No image returned from Gemini');
-    } catch (error) {
-      console.error('Gemini generation error:', error);
-      throw error;
+        console.error('Gemini generation error:', error);
+        throw error;
+      }
     }
   }
 
