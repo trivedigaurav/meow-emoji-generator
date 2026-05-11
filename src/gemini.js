@@ -206,7 +206,6 @@ Requirements:
    * @returns {Promise<Buffer>} - Processed PNG buffer with transparency
    */
   async processForEmoji(imageBuffer) {
-    // Convert to raw RGBA to detect and remove background
     const image = sharp(imageBuffer);
     const { data, info } = await image
       .ensureAlpha()
@@ -214,53 +213,43 @@ Requirements:
       .toBuffer({ resolveWithObject: true });
 
     const { width, height } = info;
-
-    // Detect background color from corners (sample multiple pixels)
     const bgColor = this.detectBackgroundColor(data, width, height);
 
-    // Remove background using flood-fill from edges only.
-    // This preserves interior fill (e.g. white inside eyes/body) while
-    // removing the solid background surrounding the emoji.
     if (bgColor) {
-      const tolerance = 30;
+      const tolerance = 40;
       const visited = new Uint8Array(width * height);
 
-      const matchesBg = (idx) => {
-        return (
-          Math.abs(data[idx] - bgColor.r) <= tolerance &&
-          Math.abs(data[idx + 1] - bgColor.g) <= tolerance &&
-          Math.abs(data[idx + 2] - bgColor.b) <= tolerance
-        );
-      };
+      const matchesBg = (idx) => (
+        data[idx + 3] > 20 && // skip already-transparent pixels
+        Math.abs(data[idx] - bgColor.r) <= tolerance &&
+        Math.abs(data[idx + 1] - bgColor.g) <= tolerance &&
+        Math.abs(data[idx + 2] - bgColor.b) <= tolerance
+      );
 
-      // Seed the flood-fill queue with all border pixels that match background
+      // Seed flood-fill from ALL border pixels that match background
       const queue = [];
-      for (let x = 0; x < width; x++) {
-        for (const y of [0, height - 1]) {
-          const pi = y * width + x;
-          if (!visited[pi] && matchesBg(pi * 4)) {
-            queue.push(pi);
-            visited[pi] = 1;
-          }
+      const seed = (pi) => {
+        if (!visited[pi] && matchesBg(pi * 4)) {
+          visited[pi] = 1;
+          queue.push(pi);
         }
+      };
+      for (let x = 0; x < width; x++) {
+        seed(0 * width + x);
+        seed((height - 1) * width + x);
       }
       for (let y = 1; y < height - 1; y++) {
-        for (const x of [0, width - 1]) {
-          const pi = y * width + x;
-          if (!visited[pi] && matchesBg(pi * 4)) {
-            queue.push(pi);
-            visited[pi] = 1;
-          }
-        }
+        seed(y * width + 0);
+        seed(y * width + (width - 1));
       }
 
       // BFS flood-fill — only spreads through adjacent background-colored pixels
       while (queue.length > 0) {
         const pi = queue.shift();
+        data[pi * 4 + 3] = 0;
+
         const px = pi % width;
         const py = Math.floor(pi / width);
-        data[pi * 4 + 3] = 0; // Make transparent
-
         for (const [dx, dy] of [[-1, 0], [1, 0], [0, -1], [0, 1]]) {
           const nx = px + dx;
           const ny = py + dy;
@@ -272,17 +261,33 @@ Requirements:
           }
         }
       }
+
+      // Cleanup pass: remove anti-aliased fringe pixels adjacent to transparent regions
+      const fringeTolerance = 60;
+      for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+          const pi = y * width + x;
+          if (data[pi * 4 + 3] === 0) continue; // already transparent
+          const idx = pi * 4;
+          if (
+            Math.abs(data[idx] - bgColor.r) <= fringeTolerance &&
+            Math.abs(data[idx + 1] - bgColor.g) <= fringeTolerance &&
+            Math.abs(data[idx + 2] - bgColor.b) <= fringeTolerance
+          ) {
+            // Check if any neighbour is transparent (i.e. this is a fringe pixel)
+            const hasTransparentNeighbour = [[-1, 0], [1, 0], [0, -1], [0, 1]].some(([dx, dy]) => {
+              const nx = x + dx, ny = y + dy;
+              if (nx < 0 || nx >= width || ny < 0 || ny >= height) return false;
+              return data[(ny * width + nx) * 4 + 3] === 0;
+            });
+            if (hasTransparentNeighbour) data[idx + 3] = 0;
+          }
+        }
+      }
     }
 
-    // Reconstruct image with transparency, trim whitespace, then resize
-    return sharp(data, {
-      raw: {
-        width,
-        height,
-        channels: 4
-      }
-    })
-      .trim()  // Remove transparent borders to eliminate excess whitespace
+    return sharp(data, { raw: { width, height, channels: 4 } })
+      .trim()
       .resize(128, 128, {
         fit: 'contain',
         background: { r: 0, g: 0, b: 0, alpha: 0 }
@@ -292,11 +297,9 @@ Requirements:
   }
 
   /**
-   * Detect background color by sampling corner pixels
-   * @param {Buffer} data - Raw RGBA pixel data
-   * @param {number} width - Image width
-   * @param {number} height - Image height
-   * @returns {Object|null} - Background color {r, g, b} or null
+   * Detect background color by sampling the full image border.
+   * Returns median color of opaque border pixels, or null if the border
+   * is already transparent or too non-uniform to be a solid background.
    */
   detectBackgroundColor(data, width, height) {
     const getPixel = (x, y) => {
@@ -304,39 +307,41 @@ Requirements:
       return { r: data[idx], g: data[idx + 1], b: data[idx + 2], a: data[idx + 3] };
     };
 
-    // Sample corners and edges
-    const samples = [
-      getPixel(0, 0),
-      getPixel(width - 1, 0),
-      getPixel(0, height - 1),
-      getPixel(width - 1, height - 1),
-      getPixel(Math.floor(width / 2), 0),
-      getPixel(Math.floor(width / 2), height - 1),
-      getPixel(0, Math.floor(height / 2)),
-      getPixel(width - 1, Math.floor(height / 2))
-    ];
-
-    // Check if corners have similar colors (likely background)
-    const tolerance = 30;
-    const firstColor = samples[0];
-    let matchCount = 0;
-
-    for (const sample of samples) {
-      if (
-        Math.abs(sample.r - firstColor.r) <= tolerance &&
-        Math.abs(sample.g - firstColor.g) <= tolerance &&
-        Math.abs(sample.b - firstColor.b) <= tolerance
-      ) {
-        matchCount++;
-      }
+    // Sample entire perimeter at regular intervals
+    const step = Math.max(1, Math.floor(Math.min(width, height) / 30));
+    const samples = [];
+    for (let x = 0; x < width; x += step) {
+      samples.push(getPixel(x, 0));
+      samples.push(getPixel(x, height - 1));
+    }
+    for (let y = step; y < height - step; y += step) {
+      samples.push(getPixel(0, y));
+      samples.push(getPixel(width - 1, y));
     }
 
-    // If at least 6 of 8 corner samples match, it's likely a solid background
-    if (matchCount >= 6) {
-      return { r: firstColor.r, g: firstColor.g, b: firstColor.b };
-    }
+    // If border is already transparent, nothing to remove
+    const opaque = samples.filter(s => s.a > 200);
+    if (opaque.length < samples.length * 0.4) return null;
 
-    return null;
+    // Median color is robust against outliers (e.g. emoji touching border)
+    const median = (arr) => {
+      const sorted = [...arr].sort((a, b) => a - b);
+      return sorted[Math.floor(sorted.length / 2)];
+    };
+    const medR = median(opaque.map(s => s.r));
+    const medG = median(opaque.map(s => s.g));
+    const medB = median(opaque.map(s => s.b));
+
+    // Require that most opaque border pixels are close to the median
+    const tolerance = 40;
+    const matching = opaque.filter(s =>
+      Math.abs(s.r - medR) <= tolerance &&
+      Math.abs(s.g - medG) <= tolerance &&
+      Math.abs(s.b - medB) <= tolerance
+    );
+    if (matching.length < opaque.length * 0.6) return null;
+
+    return { r: medR, g: medG, b: medB };
   }
 
   /**
