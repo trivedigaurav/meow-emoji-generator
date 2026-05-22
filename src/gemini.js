@@ -16,7 +16,8 @@ class EmojiGenerator {
     this.stylePrompt = `Create a cute cat emoji in the "meow" style with these characteristics:
 - Yellow/golden colored cat face or full body
 - Simple, cartoon-like design suitable for a small emoji (128x128 pixels)
-- Black outline/whiskers
+- THICK, BOLD black outlines around the entire cat and all elements (minimum 3-4px stroke weight) — this is critical for readability at small sizes
+- Black whiskers with the same thick stroke
 - Expressive eyes and facial features
 - Flat design, no 3D effects or shadows
 - TRANSPARENT BACKGROUND (this is critical - no background color at all)
@@ -262,28 +263,6 @@ Requirements:
         }
       }
 
-      // Cleanup pass: remove anti-aliased fringe pixels adjacent to transparent regions
-      const fringeTolerance = 60;
-      for (let y = 0; y < height; y++) {
-        for (let x = 0; x < width; x++) {
-          const pi = y * width + x;
-          if (data[pi * 4 + 3] === 0) continue; // already transparent
-          const idx = pi * 4;
-          if (
-            Math.abs(data[idx] - bgColor.r) <= fringeTolerance &&
-            Math.abs(data[idx + 1] - bgColor.g) <= fringeTolerance &&
-            Math.abs(data[idx + 2] - bgColor.b) <= fringeTolerance
-          ) {
-            // Check if any neighbour is transparent (i.e. this is a fringe pixel)
-            const hasTransparentNeighbour = [[-1, 0], [1, 0], [0, -1], [0, 1]].some(([dx, dy]) => {
-              const nx = x + dx, ny = y + dy;
-              if (nx < 0 || nx >= width || ny < 0 || ny >= height) return false;
-              return data[(ny * width + nx) * 4 + 3] === 0;
-            });
-            if (hasTransparentNeighbour) data[idx + 3] = 0;
-          }
-        }
-      }
     }
 
     return sharp(data, { raw: { width, height, channels: 4 } })
@@ -407,7 +386,7 @@ The new emoji should show: ${description}
 
 IMPORTANT: Match the reference images' style exactly:
 - Same yellow/golden cat color
-- Same line thickness and style
+- Same THICK, BOLD black outlines (3-4px minimum stroke weight) — match exactly how heavy the lines are in the references
 - Same level of detail and simplicity
 - Same cute aesthetic
 - TRANSPARENT BACKGROUND - no solid color behind the cat, just the cat floating on transparency`;
