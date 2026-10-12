@@ -3,27 +3,65 @@ const fs = require('fs');
 const path = require('path');
 const sharp = require('sharp');
 
+// Image generation + editing. Nano Banana 2.1 via the Interactions API so that
+// follow-up edits can chain on a server-side interaction id instead of us
+// storing images anywhere.
+const DEFAULT_IMAGE_MODEL = 'gemini-nano-banana-2.1';
+// Cheap text model for prompt improvement and naming.
+// NOTE: gemini-2.0-flash was shut down on 2026-06-01.
+const DEFAULT_TEXT_MODEL = 'gemini-3.5-flash-lite';
+
+// Hand-made meow emojis that define the style. Always sent as references.
+const CORE_REFERENCE_FILES = [
+  'meow_happy.png',
+  'meow_hearteyes.png',
+  'meow_adorable.png',
+  'meow_thx.png',
+  'meow_huggies.png',
+  'meow_thumbsup.png'
+];
+// Extra random references on top of the core set. Each input image costs
+// ~1,120 tokens on Nano Banana 2.1 regardless of pixel size, so keep this small.
+const RANDOM_REFERENCE_COUNT = 2;
+
+const RETRIABLE_STATUSES = new Set([429, 500, 502, 503, 504]);
+const MAX_ATTEMPTS = 3;
+
+class PreviousInteractionUnavailableError extends Error {
+  constructor(cause) {
+    super(`Previous interaction unavailable: ${cause?.message || cause}`);
+    this.name = 'PreviousInteractionUnavailableError';
+    this.code = 'PREVIOUS_INTERACTION_UNAVAILABLE';
+    this.cause = cause;
+  }
+}
+
 class EmojiGenerator {
-  constructor(apiKey) {
+  constructor(apiKey, { imageModel = DEFAULT_IMAGE_MODEL, textModel = DEFAULT_TEXT_MODEL } = {}) {
     this.client = new GoogleGenAI({ apiKey });
-    this.model = 'gemini-2.5-flash-image';
+    this.model = imageModel;
+    this.textModel = textModel;
 
     // Style prompt based on the meow emoji collection
     // Context: These emojis are for Health Universe (healthuniverse.com) - a healthcare AI company
     // that builds AI-powered clinical workflow automation tools for hospitals and clinics.
     // Their platform "Navigator" helps clinicians with patient care through AI assistance.
     // Key themes: healthcare, AI, clinical workflows, patient care, medical technology, teamwork
+    //
+    // The model outputs JPEG (no alpha channel), so we ask for a flat pure-white
+    // background and knock it out in processForEmoji. Asking for "transparent"
+    // tends to produce fake checkerboards, which the flood fill can't remove.
     this.stylePrompt = `Create a cute cat emoji in the "meow" style with these characteristics:
 - Yellow/golden colored cat face or full body
 - Simple, cartoon-like design suitable for a small emoji (128x128 pixels)
 - THICK, BOLD black outlines around the entire cat and all elements (minimum 3-4px stroke weight) — this is critical for readability at small sizes
 - Black whiskers with the same thick stroke
 - Expressive eyes and facial features
-- Flat design, no 3D effects or shadows
-- TRANSPARENT BACKGROUND (this is critical - no background color at all)
+- Flat design, no 3D effects, no shadows, no gradients
+- PLAIN SOLID PURE WHITE BACKGROUND (#FFFFFF) with nothing else on it — no checkerboard, no border, no drop shadow
 - Cute, friendly, and playful aesthetic
 - Similar to Slack/Discord custom emojis
-- The cat should be the only element, floating on transparency
+- The cat should be the only element, centered, with a little white margin around it
 
 Context: These emojis are for Health Universe, a healthcare AI company. When relevant, the emojis may incorporate:
 - Healthcare themes (stethoscopes, medical charts, hospital settings, patient care)
@@ -41,7 +79,7 @@ However, only include these themes when they fit naturally with the requested em
   async improvePrompt(userPrompt) {
     try {
       const response = await this.client.models.generateContent({
-        model: 'gemini-2.0-flash',
+        model: this.textModel,
         contents: [{
           parts: [{
             text: `You are an expert at improving prompts for generating cute cat emojis.
@@ -67,7 +105,7 @@ Return ONLY the improved prompt, nothing else. Do not include any explanations o
         }]
       });
 
-      const improvedPrompt = response.candidates[0].content.parts[0].text.trim();
+      const improvedPrompt = response.text.trim();
       console.log('Improved prompt:', userPrompt, '->', improvedPrompt);
       return improvedPrompt;
     } catch (error) {
@@ -85,7 +123,7 @@ Return ONLY the improved prompt, nothing else. Do not include any explanations o
   async generateEmojiName(description) {
     try {
       const response = await this.client.models.generateContent({
-        model: 'gemini-2.0-flash',
+        model: this.textModel,
         contents: [{
           parts: [{
             text: `Generate a short, catchy Slack emoji name for a cat emoji described as: "${description}"
@@ -111,12 +149,12 @@ Return ONLY the emoji name, nothing else.`
         }]
       });
 
-      let name = response.candidates[0].content.parts[0].text.trim();
+      let name = response.text.trim();
 
       // Clean up the response - ensure it starts with meow- and is properly formatted
       name = name.toLowerCase().replace(/[^a-z0-9-]/g, '');
       if (!name.startsWith('meow-')) {
-        name = 'meow-' + name.replace(/^meow/, '');
+        name = 'meow-' + name.replace(/^meow-?/, '');
       }
 
       // Limit length
@@ -141,69 +179,168 @@ Return ONLY the emoji name, nothing else.`
   }
 
   /**
-   * Generate an emoji image based on description
-   * @param {string} description - What the emoji should depict
-   * @param {string[]} referenceImages - Optional base64 reference images
-   * @returns {Promise<Buffer>} - PNG image buffer
+   * Load style reference images as Interactions API image inputs.
+   * Core references always; a few random extras when available.
+   * @param {string} referenceDir
+   * @returns {Array<{type: 'image', mime_type: string, data: string}>}
    */
-  async generateEmoji(description, referenceImages = []) {
-    const prompt = `${this.stylePrompt}
+  loadStyleReferences(referenceDir) {
+    if (!referenceDir || !fs.existsSync(referenceDir)) return [];
 
-The emoji should show: ${description}
+    const allPngs = fs.readdirSync(referenceDir).filter(f => f.startsWith('meow') && f.endsWith('.png'));
+    if (allPngs.length === 0) return [];
 
-Requirements:
-- Output a single emoji-sized image
-- Make it instantly recognizable at small sizes
-- Keep the meow cat as the main character
-- Square aspect ratio (1:1)
-- MUST have transparent/clear background with NO solid color behind the cat`;
-
-    const contents = [{ text: prompt }];
-
-    // Add reference images if provided
-    for (const refImage of referenceImages) {
-      contents.push({
-        inlineData: {
-          mimeType: 'image/png',
-          data: refImage
-        }
-      });
+    const core = CORE_REFERENCE_FILES.filter(f => allPngs.includes(f));
+    const missingCore = CORE_REFERENCE_FILES.filter(f => !allPngs.includes(f));
+    if (missingCore.length) {
+      console.warn('Missing core reference files:', missingCore.join(', '));
     }
 
-    try {
-      const response = await this.client.models.generateContent({
-        model: this.model,
-        contents: [{ parts: contents }],
-        generationConfig: {
-          responseModalities: ['IMAGE'],
-          imageConfig: {
-            aspectRatio: '1:1',
-            imageSize: '1K'
-          }
-        }
-      });
+    const extras = allPngs
+      .filter(f => !CORE_REFERENCE_FILES.includes(f))
+      .sort(() => Math.random() - 0.5)
+      .slice(0, RANDOM_REFERENCE_COUNT);
 
-      // Extract image from response
-      for (const part of response.candidates[0].content.parts) {
-        if (part.inlineData) {
-          const imageBuffer = Buffer.from(part.inlineData.data, 'base64');
+    return [...core, ...extras].map(file => ({
+      type: 'image',
+      mime_type: 'image/png',
+      data: fs.readFileSync(path.join(referenceDir, file)).toString('base64')
+    }));
+  }
 
-          // Resize to emoji size (128x128) and ensure PNG format
-          const processedImage = await this.processForEmoji(imageBuffer);
-          return processedImage;
-        }
+  buildGenerationPrompt(description, { hasReferences, hasPerson }) {
+    const personPrompt = hasPerson ? `
+I've also included a photo of a real person. Make the cat emoji RESEMBLE this person by incorporating their distinctive features:
+- Match their hairstyle/hair color on the cat
+- If they have facial hair (beard, mustache), give the cat similar facial hair
+- Match their clothing/outfit style (e.g., blazer, shirt color)
+- Capture their expression/vibe (e.g., confident, friendly)
+- The cat should be clearly recognizable as a cat-version of this person
+- Keep it as a cute cat emoji - don't make it too realistic
+` : '';
+
+    const referencePrompt = hasReferences ? `
+I've included reference images showing the exact style to match. Create a new emoji in this EXACT same style.
+
+IMPORTANT: Match the reference images' style exactly:
+- Same yellow/golden cat color
+- Same THICK, BOLD black outlines (3-4px minimum stroke weight) — match exactly how heavy the lines are in the references
+- Same level of detail and simplicity
+- Same cute aesthetic
+` : '';
+
+    return `${this.stylePrompt}
+${referencePrompt}${personPrompt}
+The new emoji should show: ${description}
+
+Requirements:
+- Output a single emoji-sized image, square aspect ratio (1:1)
+- Make it instantly recognizable at small sizes
+- Keep the meow cat as the main character
+- PLAIN SOLID WHITE BACKGROUND, nothing else behind the cat`;
+  }
+
+  buildEditPrompt(instruction) {
+    return `Edit the emoji from the previous turn. Apply ONLY this change: "${instruction}"
+
+Keep everything the change doesn't mention EXACTLY the same: same cat, same pose, same expression, same colors, same proportions, same thick black outlines, same whiskers, same plain solid white background. Do not restyle or redraw the rest of the emoji. Output a single square image.`;
+  }
+
+  /**
+   * Generate a new emoji, or edit a previous one by chaining on its interaction id.
+   *
+   * @param {object} opts
+   * @param {string} [opts.description]            - What to draw (fresh generation)
+   * @param {string} [opts.referenceDir]            - Directory of meow style references
+   * @param {string} [opts.personRefPath]           - Optional photo to base the cat on
+   * @param {string} [opts.previousInteractionId]   - Chain an edit on this interaction
+   * @param {string} [opts.instruction]             - The edit to apply (with previousInteractionId)
+   * @returns {Promise<{raw: Buffer, mimeType: string, interactionId: string, processed: Buffer}>}
+   */
+  async generate({ description, referenceDir, personRefPath = null, previousInteractionId = null, instruction = null } = {}) {
+    const isEdit = Boolean(previousInteractionId);
+    if (isEdit && !instruction) throw new Error('instruction is required when editing');
+    if (!isEdit && !description) throw new Error('description is required');
+
+    const request = {
+      model: this.model,
+      response_format: { type: 'image', aspect_ratio: '1:1', image_size: '1K' }
+    };
+
+    if (isEdit) {
+      request.input = [{ type: 'text', text: this.buildEditPrompt(instruction) }];
+      request.previous_interaction_id = previousInteractionId;
+      // Edits are tightly constrained; minimal thinking is faster and drifts less.
+      request.generation_config = { thinking_level: 'minimal' };
+    } else {
+      const references = this.loadStyleReferences(referenceDir);
+      const input = [{
+        type: 'text',
+        text: this.buildGenerationPrompt(description, { hasReferences: references.length > 0, hasPerson: Boolean(personRefPath) })
+      }];
+      if (personRefPath) {
+        const ext = path.extname(personRefPath).toLowerCase();
+        input.push({
+          type: 'image',
+          mime_type: ext === '.png' ? 'image/png' : 'image/jpeg',
+          data: fs.readFileSync(personRefPath).toString('base64')
+        });
       }
+      input.push(...references);
+      request.input = input;
+      console.log(`Generating with ${references.length} style reference(s)${personRefPath ? ' + person photo' : ''}`);
+    }
 
-      throw new Error('No image returned from Gemini');
-    } catch (error) {
-      console.error('Gemini generation error:', error);
-      throw error;
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      try {
+        const interaction = await this.client.interactions.create(request);
+        const image = interaction.output_image;
+        if (!image || !image.data) {
+          throw new Error(`No image returned from Gemini (status: ${interaction.status})`);
+        }
+        const raw = Buffer.from(image.data, 'base64');
+        const processed = await this.processForEmoji(raw);
+        console.log('Gemini interaction', interaction.id, 'status', interaction.status, 'thought tokens', interaction.usage?.total_thought_tokens);
+        return { raw, mimeType: image.mime_type, interactionId: interaction.id, processed };
+      } catch (error) {
+        const status = error?.status;
+
+        // Expired or unknown previous interaction: let the caller fall back to a fresh generation.
+        // Verified: a well-formed id that no longer exists returns 404 "Requested entity was not found";
+        // a malformed id returns 400 "Invalid JSON payload".
+        if (isEdit && (status === 404 || (status === 400 && /interaction|invalid json payload/i.test(error?.message || '')))) {
+          throw new PreviousInteractionUnavailableError(error);
+        }
+
+        const isLastAttempt = attempt === MAX_ATTEMPTS;
+        if (RETRIABLE_STATUSES.has(status) && !isLastAttempt) {
+          const backoffMs = 1000 * Math.pow(2, attempt - 1);
+          console.warn(`Gemini generation failed (status ${status}), retrying in ${backoffMs}ms (attempt ${attempt}/${MAX_ATTEMPTS})`);
+          await new Promise(resolve => setTimeout(resolve, backoffMs));
+          continue;
+        }
+
+        console.error('Gemini generation error:', error);
+        throw error;
+      }
     }
   }
 
   /**
+   * Back-compat wrapper: generate with style references, return the processed 128x128 PNG.
+   * @param {string} description
+   * @param {string} referenceDir
+   * @param {string} [personRefPath]
+   * @returns {Promise<Buffer>}
+   */
+  async generateWithReferences(description, referenceDir, personRefPath = null) {
+    const { processed } = await this.generate({ description, referenceDir, personRefPath });
+    return processed;
+  }
+
+  /**
    * Process image to be Slack emoji compatible with transparent background
-   * @param {Buffer} imageBuffer - Raw image buffer
+   * @param {Buffer} imageBuffer - Raw image buffer (PNG or JPEG)
    * @returns {Promise<Buffer>} - Processed PNG buffer with transparency
    */
   async processForEmoji(imageBuffer) {
@@ -245,8 +382,9 @@ Requirements:
       }
 
       // BFS flood-fill — only spreads through adjacent background-colored pixels
-      while (queue.length > 0) {
-        const pi = queue.shift();
+      let head = 0;
+      while (head < queue.length) {
+        const pi = queue[head++];
         data[pi * 4 + 3] = 0;
 
         const px = pi % width;
@@ -262,7 +400,6 @@ Requirements:
           }
         }
       }
-
     }
 
     return sharp(data, { raw: { width, height, channels: 4 } })
@@ -324,142 +461,6 @@ Requirements:
   }
 
   /**
-   * Generate emoji with style reference from existing emojis
-   * @param {string} description - What the emoji should depict
-   * @param {string} referenceDir - Directory containing reference emojis
-   * @param {string} [personRefPath] - Optional path to a person's photo to base the cat on
-   * @returns {Promise<Buffer>} - PNG image buffer
-   */
-  async generateWithReferences(description, referenceDir, personRefPath = null) {
-    const referenceImages = [];
-
-    // Core reference images to guide the style
-    const coreReferenceFiles = [
-      'meow_happy.png',
-      'meow_hearteyes.png',
-      'meow_adorable.png',
-      'meow_thx.png',
-      'meow_huggies.png',
-      'meow_thumbsup.png'
-    ];
-
-    // If referenceDir is missing or empty, generate without style references
-    if (!fs.existsSync(referenceDir) || fs.readdirSync(referenceDir).filter(f => f.endsWith('.png')).length === 0) {
-      console.log('No reference images available, generating without style references');
-      return this.generateEmoji(description);
-    }
-
-    // Get all meow emoji files and select 5 random ones (excluding core references)
-    const allFiles = fs.readdirSync(referenceDir).filter(f =>
-      f.startsWith('meow') && f.endsWith('.png') && !coreReferenceFiles.includes(f)
-    );
-    const randomFiles = allFiles.sort(() => Math.random() - 0.5).slice(0, 5);
-
-    // Combine core references with random samples
-    const referenceFiles = [...coreReferenceFiles, ...randomFiles];
-
-    for (const file of referenceFiles) {
-      const filePath = path.join(referenceDir, file);
-      if (fs.existsSync(filePath)) {
-        const imageData = fs.readFileSync(filePath);
-        referenceImages.push(imageData.toString('base64'));
-      }
-    }
-
-    let personPrompt = '';
-    if (personRefPath) {
-      personPrompt = `
-I've also included a photo of a real person. Make the cat emoji RESEMBLE this person by incorporating their distinctive features:
-- Match their hairstyle/hair color on the cat
-- If they have facial hair (beard, mustache), give the cat similar facial hair
-- Match their clothing/outfit style (e.g., blazer, shirt color)
-- Capture their expression/vibe (e.g., confident, friendly)
-- The cat should be clearly recognizable as a cat-version of this person
-- Keep it as a cute cat emoji - don't make it too realistic`;
-    }
-
-    const prompt = `${this.stylePrompt}
-
-I've included reference images showing the exact style to match. Create a new emoji in this EXACT same style.
-${personPrompt}
-The new emoji should show: ${description}
-
-IMPORTANT: Match the reference images' style exactly:
-- Same yellow/golden cat color
-- Same THICK, BOLD black outlines (3-4px minimum stroke weight) — match exactly how heavy the lines are in the references
-- Same level of detail and simplicity
-- Same cute aesthetic
-- TRANSPARENT BACKGROUND - no solid color behind the cat, just the cat floating on transparency`;
-
-    const contents = [{ text: prompt }];
-
-    // Add person reference photo first if provided
-    if (personRefPath) {
-      const personData = fs.readFileSync(personRefPath);
-      const ext = path.extname(personRefPath).toLowerCase();
-      const mimeType = ext === '.png' ? 'image/png' : 'image/jpeg';
-      contents.push({
-        inlineData: {
-          mimeType,
-          data: personData.toString('base64')
-        }
-      });
-    }
-
-    // Add style reference images
-    for (const refImage of referenceImages) {
-      contents.push({
-        inlineData: {
-          mimeType: 'image/png',
-          data: refImage
-        }
-      });
-    }
-
-    const maxAttempts = 3;
-    const retriableStatuses = new Set([429, 500, 502, 503, 504]);
-
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      try {
-        const response = await this.client.models.generateContent({
-          model: this.model,
-          contents: [{ parts: contents }],
-          generationConfig: {
-            responseModalities: ['IMAGE'],
-            imageConfig: {
-              aspectRatio: '1:1',
-              imageSize: '1K'
-            }
-          }
-        });
-
-        for (const part of response.candidates[0].content.parts) {
-          if (part.inlineData) {
-            const imageBuffer = Buffer.from(part.inlineData.data, 'base64');
-            return this.processForEmoji(imageBuffer);
-          }
-        }
-
-        throw new Error('No image returned from Gemini');
-      } catch (error) {
-        const status = error?.status;
-        const isLastAttempt = attempt === maxAttempts;
-        const isRetriable = retriableStatuses.has(status);
-
-        if (isRetriable && !isLastAttempt) {
-          const backoffMs = 1000 * Math.pow(2, attempt - 1);
-          console.warn(`Gemini generation failed (status ${status}), retrying in ${backoffMs}ms (attempt ${attempt}/${maxAttempts})`);
-          await new Promise(resolve => setTimeout(resolve, backoffMs));
-          continue;
-        }
-
-        console.error('Gemini generation error:', error);
-        throw error;
-      }
-    }
-  }
-
-  /**
    * Save generated emoji to file
    * @param {Buffer} imageBuffer - Image buffer
    * @param {string} name - Emoji name
@@ -476,3 +477,5 @@ IMPORTANT: Match the reference images' style exactly:
 }
 
 module.exports = EmojiGenerator;
+module.exports.PreviousInteractionUnavailableError = PreviousInteractionUnavailableError;
+module.exports.CORE_REFERENCE_FILES = CORE_REFERENCE_FILES;

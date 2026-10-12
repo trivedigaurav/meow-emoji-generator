@@ -46,6 +46,9 @@ GEMINI_API_KEY=your-gemini-api-key
 3. Select your workspace
 4. Copy the contents of `manifest.json` and paste it
 5. Install the app to your workspace
+   - Bot scopes required: `commands`, `chat:write`, `files:write`, `app_mentions:read`, `channels:history`, `groups:history` (the history scopes let the bot read an emoji thread's versions when you ask for a tweak)
+   - Event subscription: `app_mention`
+   - Invite the bot to the channels where it should work (`/invite @Meow Emoji Generator`)
 6. Copy the tokens:
    - **Bot Token**: OAuth & Permissions > Bot User OAuth Token
    - **Signing Secret**: Basic Information > Signing Secret
@@ -55,19 +58,34 @@ GEMINI_API_KEY=your-gemini-api-key
 
 ### Slack Commands
 
-**Preview an emoji:**
+**Generate an emoji:**
 ```
-/emoji happy cat with sunglasses
-```
-
-**Generate and save an emoji:**
-```
-/emoji-add meow_cool happy cat with sunglasses
+/meow happy cat with sunglasses
 ```
 
-**Mention the bot:**
+**Mention the bot (replies in a thread):**
 ```
-@Emoji Generator emoji cat eating pizza
+@Meow Emoji Generator cat eating pizza
+```
+
+**Tweak it in the thread.** Every generated emoji starts a thread that acts as its editing session. Reply in that thread with `@Meow Emoji Generator` plus what to change, and the bot edits the previous version in place (same cat, same pose) and posts it as `v2`, `v3`, ...
+
+```
+@Meow Emoji Generator add sunglasses
+@Meow Emoji Generator make it wink
+@Meow Emoji Generator again              # re-roll the current version
+@Meow Emoji Generator back to v2         # later tweaks build on v2
+@Meow Emoji Generator back to v2, add a scarf
+@Meow Emoji Generator start over         # regenerate from the original prompt
+```
+
+Anyone in the thread can tweak. One tweak runs at a time per thread. A different *concept* ("dog on a skateboard") should be a new `/meow`, not a tweak.
+
+Edits chain on the Gemini Interactions API (`previous_interaction_id`), so nothing is stored outside Slack: each version message carries its interaction id in Slack message metadata. Interactions expire after 55 days on a paid Gemini tier (1 day on the free tier); after that a tweak is rebuilt from the prompt history instead of edited in place.
+
+**How to add the result to the workspace:**
+```
+/meow-add
 ```
 
 ### CLI Usage

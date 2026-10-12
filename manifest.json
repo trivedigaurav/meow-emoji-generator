@@ -3,7 +3,7 @@
     "name": "Meow Emoji Generator",
     "description": "Create adorable custom cat emojis with AI! Use /meow to generate cute meow-style emojis for any emotion or situation. Powered by Google Gemini.",
     "background_color": "#B37F00",
-    "long_description": "Meow Emoji Generator brings AI-powered creativity to your Slack workspace! Generate unlimited custom cat emojis in the beloved 'meow' style - cute yellow cats with expressive faces perfect for any reaction.\n\nFeatures:\n- /meow [description] - Instantly generate a preview emoji from any description\n- /meow-add [name] [description] - Generate and save emojis with custom names\n- Style-matched generation using reference emojis for consistent look\n- Transparent backgrounds ready for Slack\n- Powered by Google Gemini AI image generation\n\nExamples:\n- /meow happy cat celebrating\n- /meow cat drinking coffee on Monday\n- /meow-add excited cat jumping with joy\n\nPerfect for teams who love expressive reactions and want unique emojis that match their culture!"
+    "long_description": "Meow Emoji Generator brings AI-powered creativity to your Slack workspace! Generate unlimited custom cat emojis in the beloved 'meow' style - cute yellow cats with expressive faces perfect for any reaction.\n\nFeatures:\n- /meow [description] - Instantly generate a preview emoji from any description\n- @Meow Emoji Generator [description] - Same thing, in a thread\n- Reply in the thread with @Meow + a tweak (\"add sunglasses\", \"make it wink\") to refine the emoji without starting over\n- \"@Meow again\" re-rolls, \"@Meow back to v2\" rewinds, \"@Meow start over\" resets\n- Style-matched generation using reference emojis for consistent look\n- Transparent backgrounds ready for Slack\n- Powered by Google Gemini (Nano Banana) image generation\n\nExamples:\n- /meow happy cat celebrating\n- /meow cat drinking coffee on Monday\n- @Meow Emoji Generator excited cat jumping with joy\n\nPerfect for teams who love expressive reactions and want unique emojis that match their culture!"
   },
   "features": {
     "bot_user": {
@@ -13,12 +13,14 @@
     "slash_commands": [
       {
         "command": "/meow",
+        "url": "https://eubewkxpdxm6y3sike6nb7w2z40ntzkd.lambda-url.us-east-1.on.aws/",
         "description": "Generate a new custom meow emoji",
         "usage_hint": "[description] - e.g., /meow happy cat with sunglasses",
         "should_escape": false
       },
       {
         "command": "/meow-add",
+        "url": "https://eubewkxpdxm6y3sike6nb7w2z40ntzkd.lambda-url.us-east-1.on.aws/",
         "description": "How to add a meow emoji to your workspace",
         "should_escape": false
       }
@@ -29,16 +31,26 @@
       "bot": [
         "commands",
         "chat:write",
-        "files:write"
+        "files:write",
+        "app_mentions:read",
+        "channels:history",
+        "groups:history"
       ]
     }
   },
   "settings": {
+    "event_subscriptions": {
+      "request_url": "https://eubewkxpdxm6y3sike6nb7w2z40ntzkd.lambda-url.us-east-1.on.aws/",
+      "bot_events": [
+        "app_mention"
+      ]
+    },
     "interactivity": {
-      "is_enabled": true
+      "is_enabled": true,
+      "request_url": "https://eubewkxpdxm6y3sike6nb7w2z40ntzkd.lambda-url.us-east-1.on.aws/"
     },
     "org_deploy_enabled": false,
-    "socket_mode_enabled": true,
+    "socket_mode_enabled": false,
     "token_rotation_enabled": false
   }
 }
