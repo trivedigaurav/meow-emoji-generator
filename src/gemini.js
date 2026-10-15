@@ -116,6 +116,55 @@ Return ONLY the improved prompt, nothing else. Do not include any explanations o
   }
 
   /**
+   * Decide whether a thread follow-up wants to edit the current emoji or start a new one.
+   * @param {{ text: string, currentDescription: string }} args
+   * @returns {Promise<'edit'|'new'|null>} null when the model gave no usable answer
+   */
+  async classifyFollowUp({ text, currentDescription }) {
+    try {
+      const response = await this.client.models.generateContent({
+        model: this.textModel,
+        config: { temperature: 0, responseMimeType: 'application/json' },
+        contents: [{
+          parts: [{
+            text: `You are routing a message in a Slack thread about a custom cat emoji.
+
+The emoji currently in the thread: "${currentDescription}"
+
+Decide what the user wants:
+- EDIT: a change to the current emoji. The message only makes sense relative to it: a fragment that adds, removes or alters one detail ("add a scarf", "remove the hat", "bigger smile", "green instead of yellow", "make it cry", "same but sleeping"), or that refers to it ("it", "the hat", "the current one").
+- NEW: a self-contained description that would be a complete emoji request on its own, with no prior context ("cat on a bike", "angry cat", "a rocket", "cat eating pizza"). Every emoji here is a cat, so mentioning a cat does NOT make it an edit. A full description is NEW even if it shares a detail with the current emoji.
+
+Test: would the message be a complete request by itself? If yes, NEW. If it only works as a change to the current emoji, EDIT.
+A short noun phrase that names an emoji ("tired cat", "cat with a crown", "a taco") is NEW even when it only changes the mood; it would be EDIT only if phrased as a change ("make it tired", "tired instead", "now with a crown").
+
+The user just wrote: "${text}"
+
+Reply with JSON: {"standalone_request": true|false, "verdict": "EDIT"|"NEW"}`
+          }]
+        }]
+      });
+
+      const answer = (response.text || '').trim();
+      console.log('Follow-up classification:', JSON.stringify(text), '->', answer);
+      let verdict = '';
+      try {
+        verdict = String(JSON.parse(answer.replace(/^```(?:json)?|```$/g, '').trim()).verdict || '');
+      } catch {
+        verdict = answer; // not JSON; fall through to the word check
+      }
+      // The one-word answer was flaky in testing; asking for the intermediate "standalone_request"
+      // judgement first made it consistent.
+      if (/\bEDIT\b/i.test(verdict) && !/\bNEW\b/i.test(verdict)) return 'edit';
+      if (/\bNEW\b/i.test(verdict) && !/\bEDIT\b/i.test(verdict)) return 'new';
+      return null;
+    } catch (error) {
+      console.error('Error classifying follow-up:', error);
+      return null;
+    }
+  }
+
+  /**
    * Generate a Slack-friendly emoji name using Gemini
    * @param {string} description - The emoji description
    * @returns {Promise<string>} - Emoji name in format "meow-keyword1-keyword2"

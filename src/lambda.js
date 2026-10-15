@@ -21,7 +21,9 @@ const REFERENCE_DIR = path.join(__dirname, '../examples');
 const OUTPUT_DIR = path.join(os.tmpdir(), 'generated');
 
 // Thread state lives in Slack message metadata. One thread = one emoji's editing session.
-//   meow_version    - a posted emoji version; payload { v, iid, name, prompt, improved, instruction, parent_v }
+//   meow_version    - a posted emoji version; payload { v, iid, name, prompt, improved, instruction, parent_v, root }
+//                     root=true marks a fresh generation; it starts a new lineage and earlier versions in the
+//                     thread no longer count (a plain description inside a thread starts a new emoji)
 //   meow_generating - placeholder while a version is being generated; acts as a per-thread lock
 //   meow_pointer    - "back to vN" without an edit; later tweaks chain from that version
 //   meow_failed     - a placeholder that was turned into an error message (no longer a lock)
@@ -140,7 +142,11 @@ function stripMention(text) {
 /**
  * Interpret a follow-up message inside an emoji thread.
  *
- * @returns {{mode: 'reroll'|'fresh'|'pointer'|'edit', fromVersion?: number, instruction?: string}}
+ * Explicit keywords force the interpretation: "tweak: add sunglasses" / "edit: make it wink" edit the
+ * current emoji, "new: dog on a skateboard" starts a new one, "v2: add a hat" / "back to v2" pick a version.
+ * Anything else is 'auto': the worker asks Gemini whether it is an edit or a new emoji.
+ *
+ * @returns {{mode: 'auto'|'new'|'reroll'|'fresh'|'pointer'|'edit', fromVersion?: number, instruction?: string, description?: string, text?: string}}
  */
 function parseFollowUp(text) {
   const raw = (text || '').trim();
@@ -167,7 +173,28 @@ function parseFollowUp(text) {
       : { mode: 'pointer', fromVersion };
   }
 
-  return { mode: 'edit', instruction: raw };
+  // "tweak: add sunglasses", "edit - make it wink", "tweak add a hat"
+  m = raw.match(/^(?:tweak|edit)\b\s*[:\-–—]?\s*(.*)$/i);
+  if (m) {
+    return { mode: 'edit', instruction: m[1].trim() };
+  }
+
+  // "new: dog with a hat", "new emoji - cat drinking coffee"
+  m = raw.match(/^new(?:\s+emoji)?\s*[:\-–—]\s*(.+)$/i);
+  if (m) {
+    return { mode: 'new', description: m[1].trim() };
+  }
+
+  return { mode: 'auto', text: raw };
+}
+
+/**
+ * Last-resort guess when the classifier is unavailable: phrasing that can only be an edit.
+ */
+function guessFollowUp(text) {
+  return /^(add|remove|change|replace|put|no |without|more |less |make (it|him|her|them|the)|give (it|him|her|them)|turn (it|him|her|them))\b/i.test(text)
+    ? 'edit'
+    : 'new';
 }
 
 /**
@@ -185,6 +212,7 @@ async function readThreadState(channel, rootTs, client = slackClient) {
   const versions = [];
   let latest = null;
   let busy = false;
+  let maxVersion = 0;
 
   for (const m of res.messages || []) {
     const md = m.metadata;
@@ -202,6 +230,13 @@ async function readThreadState(channel, rootTs, client = slackClient) {
         parentVersion: Number(p.parent_v || 0),
         ts: m.ts
       };
+      maxVersion = Math.max(maxVersion, v.v);
+      // A fresh generation starts a new lineage: earlier versions (and pointers) no longer count.
+      // Pre-`root` v1 messages are roots too.
+      if (p.root || v.v === 1) {
+        versions.length = 0;
+        latest = null;
+      }
       versions.push(v);
       latest = { v: v.v, iid: v.iid };
     } else if (md.event_type === META.POINTER) {
@@ -223,6 +258,8 @@ async function readThreadState(channel, rootTs, client = slackClient) {
     versions,
     latest,
     busy,
+    // Highest version number across all lineages in the thread, so labels stay unique.
+    maxVersion,
     // Edit instructions so far, used to rebuild a prompt when an interaction id has expired.
     tweaks: versions.filter(x => x.v > 1 && x.instruction && !x.instruction.startsWith('(')).map(x => x.instruction)
   };
@@ -390,7 +427,7 @@ async function handleAppMention(slackEvent, context) {
     await slackClient.chat.postMessage({
       channel: channelId,
       thread_ts: rootTs,
-      text: 'What kind of emoji would you like? Just describe it!\n\nExample: `@Meow Emoji Generator happy cat with sunglasses`\n\nInside an emoji thread, describe a tweak instead: `@Meow Emoji Generator add sunglasses`'
+      text: 'What kind of emoji would you like? Just describe it!\n\nExample: `@Meow Emoji Generator happy cat with sunglasses`\n\nInside an emoji thread, I work out whether you want a tweak or another emoji. Force it with `tweak: add sunglasses` or `new: dog on a skateboard`.'
     });
     return;
   }
@@ -437,6 +474,63 @@ async function handleAppMention(slackEvent, context) {
   const cmd = parseFollowUp(text);
   console.log('Follow-up command:', cmd);
 
+  const nextVersion = state.maxVersion + 1;
+
+  if (cmd.mode === 'new') {
+    const placeholderTs = await postPlaceholder({
+      channelId,
+      threadTs: rootTs,
+      text: `${randomFrom(generatingMessages)}\n\nNew emoji as v${nextVersion}: "${cmd.description}"`,
+      version: nextVersion
+    });
+    await invokeWorker(context, {
+      command: 'generate',
+      description: cmd.description,
+      version: nextVersion,
+      channelId,
+      threadTs: rootTs,
+      placeholderTs,
+      userId
+    });
+    return;
+  }
+
+  if (cmd.mode === 'auto') {
+    const parent = state.latest;
+    const placeholderTs = await postPlaceholder({
+      channelId,
+      threadTs: rootTs,
+      text: `${randomFrom(tweakingMessages)}\n\nWorking on: "${cmd.text}"`,
+      version: nextVersion
+    });
+    await invokeWorker(context, {
+      command: 'followup',
+      text: cmd.text,
+      parentIid: parent.iid,
+      parentVersion: parent.v,
+      version: nextVersion,
+      baseName: state.baseName,
+      originalPrompt: state.originalPrompt,
+      improvedPrompt: state.improvedPrompt,
+      tweaks: state.tweaks,
+      channelId,
+      threadTs: rootTs,
+      placeholderTs,
+      userId
+    });
+    return;
+  }
+
+  if (cmd.mode === 'edit' && !cmd.instruction) {
+    await slackClient.chat.postEphemeral({
+      channel: channelId,
+      user: userId,
+      thread_ts: rootTs,
+      text: ':thinking_face: Tweak what? Try `tweak: add sunglasses`.'
+    });
+    return;
+  }
+
   let parent = state.latest;
   if (cmd.fromVersion !== undefined) {
     const target = state.versions.find(v => v.v === cmd.fromVersion);
@@ -462,7 +556,6 @@ async function handleAppMention(slackEvent, context) {
     return;
   }
 
-  const nextVersion = state.versions[state.versions.length - 1].v + 1;
   const label = cmd.mode === 'edit'
     ? `v${parent.v} → v${nextVersion}: "${cmd.instruction}"`
     : cmd.mode === 'reroll'
@@ -656,10 +749,12 @@ module.exports.handler = async (event, context) => {
 };
 
 /**
- * Fresh generation (from /meow or a top-level @mention).
+ * Fresh generation (from /meow, a top-level @mention, or a plain description inside a thread).
+ * `version` > 1 means it was started inside an existing thread; it becomes the root of a new lineage.
  */
 async function runGenerate(event) {
   const { description, channelId, userId, threadTs, placeholderTs } = event;
+  const version = Number(event.version) || 1;
 
   try {
     console.log('Improving prompt for:', description);
@@ -682,9 +777,12 @@ async function runGenerate(event) {
       fileName: `${emojiName}.png`,
       title: emojiName,
       buffer: processed,
-      caption: `:artist: Created by <@${userId}>`,
+      caption: version === 1
+        ? `:artist: Created by <@${userId}>`
+        : `*v${version}* · new emoji: "${description}" · <@${userId}>`,
       metadataPayload: {
-        v: 1,
+        v: version,
+        root: true,
         iid: interactionId,
         name: emojiName,
         prompt: description,
@@ -693,7 +791,7 @@ async function runGenerate(event) {
         parent_v: 0
       }
     });
-    console.log('Version 1 posted');
+    console.log(`Version ${version} posted`);
   } catch (error) {
     console.error('Error generating emoji:', error);
     await reportFailure({ channelId, threadTs, placeholderTs, userId, message: `Failed to generate emoji: ${error.message}` });
@@ -774,6 +872,43 @@ async function runTweak(event) {
 }
 
 /**
+ * Follow-up with no explicit keyword: ask Gemini whether it is an edit of the current emoji
+ * or a new one, relabel the placeholder, then run the matching path.
+ */
+async function runFollowUp(event) {
+  const { text, parentVersion, version, improvedPrompt, tweaks = [], channelId, placeholderTs } = event;
+
+  let kind = await emojiGenerator.classifyFollowUp({
+    text,
+    currentDescription: mergedPrompt(improvedPrompt, tweaks)
+  });
+  if (!kind) {
+    kind = guessFollowUp(text);
+    console.warn('Classifier gave no answer, guessed:', kind);
+  }
+
+  const label = kind === 'new'
+    ? `New emoji as v${version}: "${text}"`
+    : `v${parentVersion} → v${version}: "${text}"`;
+  try {
+    await slackClient.chat.update({
+      channel: channelId,
+      ts: placeholderTs,
+      text: `${randomFrom(kind === 'new' ? generatingMessages : tweakingMessages)}\n\n${label}`,
+      metadata: { event_type: META.GENERATING, event_payload: { v: version, at: Date.now() } }
+    });
+  } catch (e) {
+    console.warn('Could not relabel placeholder:', e?.data?.error || e.message);
+  }
+
+  if (kind === 'new') {
+    await runGenerate({ ...event, description: text });
+  } else {
+    await runTweak({ ...event, mode: 'edit', instruction: text });
+  }
+}
+
+/**
  * Handle async work (emoji generation)
  */
 async function handleAsyncWork(event) {
@@ -791,6 +926,8 @@ async function handleAsyncWork(event) {
     await runGenerate(event);
   } else if (command === 'tweak') {
     await runTweak(event);
+  } else if (command === 'followup') {
+    await runFollowUp(event);
   } else {
     console.warn('Unknown async command:', command);
   }
@@ -799,4 +936,4 @@ async function handleAsyncWork(event) {
 }
 
 // Exposed for tests
-module.exports._internal = { parseFollowUp, readThreadState, stripMention, mergedPrompt, extractFileId, META };
+module.exports._internal = { parseFollowUp, guessFollowUp, readThreadState, stripMention, mergedPrompt, extractFileId, META };

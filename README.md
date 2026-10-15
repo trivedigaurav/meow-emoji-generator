@@ -68,7 +68,7 @@ GEMINI_API_KEY=your-gemini-api-key
 @Meow Emoji Generator cat eating pizza
 ```
 
-**Tweak it in the thread.** Every generated emoji starts a thread that acts as its editing session. Reply in that thread with `@Meow Emoji Generator` plus what to change, and the bot edits the previous version in place (same cat, same pose) and posts it as `v2`, `v3`, ...
+**Tweak it in the thread.** Every generated emoji starts a thread. Reply in that thread with `@Meow Emoji Generator` plus what to change, and the bot edits the previous version in place (same cat, same pose) and posts it as `v2`, `v3`, ...
 
 ```
 @Meow Emoji Generator add sunglasses
@@ -79,7 +79,20 @@ GEMINI_API_KEY=your-gemini-api-key
 @Meow Emoji Generator start over         # regenerate from the original prompt
 ```
 
-Anyone in the thread can tweak. One tweak runs at a time per thread. A different *concept* ("dog on a skateboard") should be a new `/meow`, not a tweak.
+**Or start another emoji in the same thread.** Describe a different concept and the bot generates a new emoji there, numbered as the next version (`v4`, ...). Tweaks after that build on the new emoji; the earlier ones in the thread are no longer editable.
+
+```
+@Meow Emoji Generator dog on a skateboard   # new emoji, posted as the next version number
+```
+
+Without a keyword, Gemini decides whether a message is a tweak or a new emoji. Force it with a prefix:
+
+```
+@Meow Emoji Generator tweak: cat drinking coffee   # edit the current emoji toward this
+@Meow Emoji Generator new: add sunglasses          # a brand-new emoji of just sunglasses
+```
+
+Anyone in the thread can tweak. One generation runs at a time per thread.
 
 Edits chain on the Gemini Interactions API (`previous_interaction_id`), so nothing is stored outside Slack: each version message carries its interaction id in Slack message metadata. Interactions expire after 55 days on a paid Gemini tier (1 day on the free tier); after that a tweak is rebuilt from the prompt history instead of edited in place.
 
